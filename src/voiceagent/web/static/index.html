@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Voice Agent</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #e6e9ef; --dim: #949cad; --accent: #7aa2f7; --ok: #9ece6a;
+    --warn: #e0af68; --err: #f7768e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1rem 4rem; background: var(--bg); color: var(--text);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); margin: 0 0 2rem; font-size: .9rem; }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.25rem; margin-bottom: 1.25rem;
+  }
+  h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .09em;
+       color: var(--dim); margin: 0 0 1rem; font-weight: 600; }
+  label { display: block; font-size: .82rem; color: var(--dim); margin: .9rem 0 .3rem; }
+  input, textarea, select {
+    width: 100%; padding: .6rem .7rem; background: #0d0f14; color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; font: inherit;
+  }
+  textarea { min-height: 96px; resize: vertical; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  button {
+    padding: .6rem 1rem; border-radius: 8px; border: 1px solid var(--line);
+    background: #222735; color: var(--text); font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #0b0d12; border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--err); }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--dim); font-size: .82rem; }
+  .status { margin-top: .8rem; font-size: .85rem; min-height: 1.2em; }
+  .ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
+  .consent {
+    border-left: 3px solid var(--warn); padding-left: .9rem; margin: 1rem 0;
+    font-size: .85rem; color: var(--dim);
+  }
+  code { background: #0d0f14; padding: .12rem .4rem; border-radius: 4px; color: var(--warn); }
+  /* Stale-process banner. Deliberately at the top of the page and in the error
+     colour: the failure it explains looks like a broken product, so it has to
+     be read before anything else on the page is believed. */
+  #stale {
+    display: none; border: 1px solid var(--err); border-left-width: 3px;
+    border-radius: 6px; padding: .8rem .9rem; margin-bottom: 1.4rem;
+    font-size: .85rem; color: var(--text); background: #1d1419;
+  }
+  #stale b { color: var(--err); }
+  #stale span { color: var(--dim); display: block; margin-top: .35rem; }
+  .voice { display: flex; justify-content: space-between; align-items: center;
+           padding: .55rem 0; border-bottom: 1px solid var(--line); font-size: .88rem; }
+  .voice:last-child { border-bottom: none; }
+  .meter { height: 4px; background: #0d0f14; border-radius: 2px; overflow: hidden; margin-top: .6rem; }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .1s; }
+  audio { width: 100%; margin-top: .9rem; }
+  .metrics { font-size: .78rem; color: var(--dim); margin-top: .5rem; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <div id="stale"></div>
+
+  <h1>Local Voice Agent</h1>
+  <p class="sub">Runs entirely on this Mac. No audio leaves the machine.</p>
+
+  <section>
+    <h2>1 · Enrol a voice</h2>
+    <div class="consent">
+      Cloning a voice is consequential. Only enrol a voice you own or have explicit
+      permission to use. Your reference clip is encrypted at rest with a key held in
+      the macOS Keychain, and you can delete it at any time.
+    </div>
+
+    <label for="name">Whose voice is this?</label>
+    <input id="name" placeholder="Your name" autocomplete="off">
+
+    <label for="consent">Type <code id="phrase">…</code> to confirm consent</label>
+    <input id="consent" placeholder="Type the phrase exactly" autocomplete="off">
+
+    <label for="reftext">What will you say / did you say? <span class="muted">(needed for Hindi &amp; other Indic languages)</span></label>
+    <input id="reftext" placeholder="Type the exact words of your reference clip" autocomplete="off">
+    <p class="muted" style="margin:.35rem 0 0; font-size:.8rem">
+      For Hindi output, record the clip <strong>in Hindi</strong> and type the same
+      Devanagari here. The Indic model conditions on the transcript as well as the
+      audio; English-only clips give an English accent.
+    </p>
+
+    <label>Reference clip <span class="muted">(<span id="minmax">…</span>, read anything aloud naturally)</span></label>
+    <div class="row">
+      <button id="rec">● Record</button>
+      <button id="stop" disabled>■ Stop</button>
+      <span class="muted">or</span>
+      <input type="file" id="file" accept="audio/*" style="flex:1; min-width:180px">
+    </div>
+    <div class="meter"><i id="level"></i></div>
+    <audio id="preview" controls hidden></audio>
+
+    <div class="row" style="margin-top:1rem">
+      <button class="primary" id="enrol" disabled>Enrol this voice</button>
+      <span class="muted" id="clipinfo"></span>
+    </div>
+    <div class="status" id="enrolStatus"></div>
+  </section>
+
+  <section>
+    <h2>2 · Saved voices</h2>
+    <div id="voices"><span class="muted">None yet.</span></div>
+    <div class="row" style="margin-top:1rem">
+      <button class="danger" id="wipe">Delete all my data</button>
+    </div>
+    <div class="status" id="wipeStatus"></div>
+  </section>
+
+  <section>
+    <h2>3 · Write something to hear</h2>
+    <label for="voiceSel">Voice</label>
+    <select id="voiceSel"></select>
+
+    <label for="text">Text</label>
+    <textarea id="text" placeholder="Type what you want to hear…">Hello. This is my own voice, running entirely on my laptop.</textarea>
+
+    <div class="row" style="margin-top:1rem">
+      <button class="primary" id="speak" disabled>Speak it</button>
+      <label for="fmt" style="margin:0">Download as</label>
+      <select id="fmt" style="width:auto">
+        <option value="webm">WebM / Opus (smallest)</option>
+        <option value="opus">Ogg / Opus</option>
+        <option value="wav">WAV (uncompressed)</option>
+        <option value="flac">FLAC (lossless)</option>
+      </select>
+      <button id="download" disabled>Download</button>
+      <span class="muted" id="speakHint">Enrol a voice first.</span>
+    </div>
+    <div class="status" id="speakStatus"></div>
+    <audio id="out" controls hidden></audio>
+    <div class="metrics" id="metrics"></div>
+  </section>
+
+  <section>
+    <h2>4 · Train on your voice</h2>
+    <p class="muted">
+      Zero-shot cloning copies your timbre from one short clip and stops there. To be
+      mistaken for you it has to learn your rhythm too, and that needs a dataset.
+      Record clips of <b>1.5–20 seconds</b> each, correct the transcript, and save.
+    </p>
+
+    <label for="dsVoice">Voice to train</label>
+    <select id="dsVoice"></select>
+
+    <div class="meter" style="margin-top:12px"><i id="dsBar"></i></div>
+    <div class="muted" id="dsProgress">No clips yet.</div>
+
+    <div style="margin-top:14px">
+      <label>Prompt <span class="muted">(optional — spans registers so your data is not all one tone)</span></label>
+      <div id="dsPrompt" class="status"></div>
+      <button id="dsNextPrompt">Another prompt</button>
+      <label style="display:inline-flex;align-items:center;gap:.4rem;margin-left:.6rem">
+        <input type="checkbox" id="dsIsReading" checked style="width:auto">
+        I am reading this prompt <span class="muted">(uses the prompt text, not Whisper)</span>
+      </label>
+      <span class="muted">or just talk naturally — that scales better than reading.</span>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button id="dsRec">● Record clip</button>
+      <button id="dsStop" disabled>■ Stop</button>
+      <span class="muted">or</span>
+      <input type="file" id="dsFile" accept="audio/*" style="flex:1; min-width:180px">
+    </div>
+    <div class="meter"><i id="dsLevel"></i></div>
+    <audio id="dsPreview" controls hidden></audio>
+
+    <label for="dsText" style="margin-top:10px">What you said <span class="muted">(auto-filled by Whisper — fix it before saving)</span></label>
+    <textarea id="dsText" placeholder="Transcript of the clip…"></textarea>
+
+    <div class="row">
+      <button class="primary" id="dsSave" disabled>Save clip</button>
+      <span class="muted" id="dsClipInfo"></span>
+    </div>
+    <div class="status" id="dsStatus"></div>
+
+    <hr style="border:none;border-top:1px solid var(--line);margin:20px 0">
+
+    <label>Or record a long take and split it automatically</label>
+    <p class="muted" style="margin:.3rem 0 .6rem">
+      Talk for a minute or two — explain something, tell a story. It is split at word
+      boundaries into clips of up to 8 seconds, each with its transcript, in one pass.
+      This is where the volume comes from: the 94 prompts are only about four minutes.
+      <b>Whisper writes these transcripts, so check them below.</b>
+    </p>
+    <div class="row">
+      <button id="dsTakeRec">● Record long take</button>
+      <button id="dsTakeStop" disabled>■ Stop &amp; split</button>
+      <span class="muted">or</span>
+      <input type="file" id="dsTakeFile" accept="audio/*" style="flex:1; min-width:180px">
+    </div>
+    <div class="meter"><i id="dsTakeLevel"></i></div>
+    <div class="status" id="dsTakeStatus"></div>
+
+    <div style="margin-top:18px">
+      <label>Clips</label>
+      <div id="dsClips"><span class="muted">None yet.</span></div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <button id="dsExport" disabled>Export for training</button>
+      <button class="danger" id="dsWipe">Delete all clips</button>
+    </div>
+    <div class="status" id="dsExportStatus"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let clipBlob = null, clipSeconds = 0, recorder = null, chunks = [], cfg = {};
+
+// MediaRecorder hands back webm/opus, which neither libsndfile nor miniaudio
+// can read. The browser can always decode its own recording, so we convert to
+// mono 16-bit WAV here and the server only ever sees a format it understands.
+// This also covers m4a/mp3 uploads for free.
+async function blobToWav(blob) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+  await ctx.close();
+
+  // Downmix to mono.
+  const n = decoded.length;
+  const mono = new Float32Array(n);
+  for (let c = 0; c < decoded.numberOfChannels; c++) {
+    const data = decoded.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += data[i] / decoded.numberOfChannels;
+  }
+
+  const sr = decoded.sampleRate;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const view = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+
+  str(0, "RIFF");  view.setUint32(4, 36 + n * 2, true);
+  str(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);      // PCM header size
+  view.setUint16(20, 1, true);       // format = PCM
+  view.setUint16(22, 1, true);       // channels = mono
+  view.setUint32(24, sr, true);
+  view.setUint32(28, sr * 2, true);  // byte rate
+  view.setUint16(32, 2, true);       // block align
+  view.setUint16(34, 16, true);      // bits per sample
+  str(36, "data"); view.setUint32(40, n * 2, true);
+
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, mono[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return { blob: new Blob([buf], { type: "audio/wav" }), seconds: n / sr };
+}
+
+const setStatus = (el, msg, cls = "") => { el.textContent = msg; el.className = "status " + cls; };
+
+async function loadConfig() {
+  cfg = await (await fetch("/api/config")).json();
+  $("phrase").textContent = cfg.consent_phrase;
+  $("minmax").textContent = `${cfg.min_seconds}–${cfg.max_seconds}s`;
+  renderStale(cfg);
+}
+
+// The server compares the code it imported against the tree on disk. When they
+// differ, synthesis can fail in ways that look like a broken model rather than a
+// stale process -- so say it here, before the user spends an hour on it.
+function renderStale(c) {
+  const el = $("stale");
+  if (!c || !c.stale) { el.style.display = "none"; return; }
+  el.innerHTML = "";
+  const head = document.createElement("b");
+  head.textContent = "This server is out of date — restart it.";
+  const body = document.createElement("span");
+  // textContent, not innerHTML: the message carries a filename from disk.
+  body.textContent = c.stale;
+  const how = document.createElement("span");
+  how.textContent = "Stop it with Ctrl-C and run  uv run voice-web  again.";
+  el.append(head, body, how);
+  el.style.display = "block";
+}
+
+// Re-checked rather than read once, for two reasons: the page is usually opened
+// long before the code changes underneath it, and after the restart that fixes
+// it the banner clears itself without anyone reloading. A failed fetch is the
+// server being restarted -- exactly what was asked for -- so it is ignored.
+setInterval(() => { loadConfig().catch(() => {}); }, 10000);
+
+// --- recording -----------------------------------------------------------
+$("rec").onclick = async () => {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    return setStatus($("enrolStatus"), "Microphone permission denied.", "err");
+  }
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+
+  // Live level meter, so it is obvious the mic is actually working.
+  const ctx = new AudioContext();
+  const analyser = ctx.createAnalyser();
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  const started = Date.now();
+  const tick = () => {
+    if (recorder.state !== "recording") return;
+    analyser.getByteTimeDomainData(buf);
+    const peak = Math.max(...buf.map(v => Math.abs(v - 128))) / 128;
+    $("level").style.width = Math.min(100, peak * 180) + "%";
+    const secs = (Date.now() - started) / 1000;
+    $("clipinfo").textContent = secs.toFixed(1) + "s";
+    if (secs >= cfg.max_seconds) recorder.stop();
+    requestAnimationFrame(tick);
+  };
+
+  recorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    ctx.close();
+    $("level").style.width = "0";
+    $("rec").disabled = false; $("stop").disabled = true;
+
+    const raw = new Blob(chunks, { type: recorder.mimeType });
+    try {
+      setStatus($("enrolStatus"), "Converting…");
+      const wav = await blobToWav(raw);
+      clipBlob = wav.blob;
+      clipSeconds = wav.seconds;
+      setStatus($("enrolStatus"), `Recorded ${clipSeconds.toFixed(1)}s.`, "ok");
+    } catch (e) {
+      clipBlob = null;
+      return setStatus($("enrolStatus"), "Could not process that recording: " + e.message, "err");
+    }
+    $("clipinfo").textContent = clipSeconds.toFixed(1) + "s";
+    $("preview").src = URL.createObjectURL(clipBlob);
+    $("preview").hidden = false;
+    validate();
+  };
+
+  recorder.start();
+  $("rec").disabled = true; $("stop").disabled = false;
+  setStatus($("enrolStatus"), "Recording… speak naturally.", "warn");
+  tick();
+};
+
+$("stop").onclick = () => recorder && recorder.stop();
+
+$("file").onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    setStatus($("enrolStatus"), "Converting…");
+    const wav = await blobToWav(f);
+    clipBlob = wav.blob;
+    clipSeconds = wav.seconds;
+    setStatus($("enrolStatus"), `Loaded ${clipSeconds.toFixed(1)}s.`, "ok");
+  } catch (err) {
+    clipBlob = null;
+    return setStatus($("enrolStatus"), "Could not read that file: " + err.message, "err");
+  }
+  $("clipinfo").textContent = clipSeconds.toFixed(1) + "s";
+  $("preview").src = URL.createObjectURL(clipBlob);
+  $("preview").hidden = false;
+  validate();
+};
+
+function validate() {
+  const ready = clipBlob && $("name").value.trim() &&
+    $("consent").value.trim().toLowerCase() === cfg.consent_phrase.toLowerCase();
+  $("enrol").disabled = !ready;
+  if (clipBlob && clipSeconds && clipSeconds < cfg.min_seconds)
+    setStatus($("enrolStatus"), `Clip is ${clipSeconds.toFixed(1)}s; ${cfg.min_seconds}s minimum.`, "warn");
+}
+["name", "consent"].forEach(id => $(id).addEventListener("input", validate));
+
+// --- enrolment -----------------------------------------------------------
+$("enrol").onclick = async () => {
+  const fd = new FormData();
+  fd.append("speaker_name", $("name").value);
+  fd.append("consent_phrase", $("consent").value);
+  fd.append("clip", clipBlob, "reference.wav");
+  fd.append("reference_text", $("reftext").value || "");
+
+  $("enrol").disabled = true;
+  setStatus($("enrolStatus"), "Encrypting and saving…");
+  const res = await fetch("/api/voices", { method: "POST", body: fd });
+  const body = await res.json();
+  if (!res.ok) { setStatus($("enrolStatus"), body.detail || "Failed.", "err"); $("enrol").disabled = false; return; }
+  setStatus($("enrolStatus"), `Enrolled ${body.speaker_name} (${body.duration_seconds}s).`, "ok");
+  $("consent").value = ""; clipBlob = null; $("preview").hidden = true;
+  refreshVoices();
+};
+
+// --- voices --------------------------------------------------------------
+async function refreshVoices() {
+  const voices = await (await fetch("/api/voices")).json();
+  const list = $("voices"), sel = $("voiceSel"), dsSel = $("dsVoice");
+  sel.innerHTML = "";
+  // Same voices, two selectors: section 3 speaks with one, section 4 trains one.
+  const dsPrev = dsSel.value;
+  dsSel.innerHTML = "";
+  if (!voices.length) {
+    list.innerHTML = '<span class="muted">None yet.</span>';
+    $("speak").disabled = true;
+    $("speakHint").textContent = "Enrol a voice first.";
+    $("dsProgress").textContent = "Enrol a voice first.";
+    $("dsExport").disabled = true;
+    return;
+  }
+  list.innerHTML = "";
+  voices.forEach(v => {
+    const row = document.createElement("div");
+    row.className = "voice";
+    const refText = (v.reference_text || "").trim();
+    const hasText = refText.length > 0;
+    const isIndic = /[\u0900-\u097F\u0980-\u09FF\u0B80-\u0BFF]/.test(refText);
+    // Show the transcript rather than just "set". Hiding it is how a wrong
+    // auto-transcription went unnoticed and produced unintelligible speech.
+    const state = !hasText
+      ? "<span style='color:var(--warn)'>no transcript — Indic unavailable</span>"
+      : isIndic
+        ? "<span style='color:var(--ok)'>Indic transcript — ready</span>"
+        : "<span style='color:var(--warn)'>Latin transcript — English only</span>";
+    row.innerHTML = `<span><strong>${v.speaker_name}</strong>
+      <span class="muted">· ${v.duration_seconds}s · ${state}</span>
+      ${hasText ? `<div class="muted" style="margin-top:.25rem;font-size:.78rem;opacity:.85">
+        “${refText.replace(/</g,"&lt;").slice(0,90)}${refText.length>90?"…":""}”</div>` : ""}</span>`;
+
+    // Voices enrolled before Indic support have no transcript, and re-recording
+    // a minute of audio to add one line of text would be a bad trade.
+    const fix = document.createElement("button");
+    fix.textContent = hasText ? "Edit transcript" : "Add transcript";
+
+    // Typing a transcript that does not match the audio is the single easiest
+    // way to get wildly wrong output length, so offer to do it from the audio.
+    const auto = document.createElement("button");
+    auto.textContent = "Auto-transcribe";
+    auto.title = "Transcribe with local Whisper — detects Hindi and English";
+    auto.onclick = async () => {
+      auto.disabled = true; auto.textContent = "Transcribing…";
+      const res = await fetch(`/api/voices/${v.profile_id}/transcribe`, { method: "POST" });
+      auto.disabled = false; auto.textContent = "Auto-transcribe";
+      if (!res.ok) { alert("Could not transcribe this clip."); return; }
+      refreshVoices();
+    };
+    row.appendChild(auto);
+    fix.onclick = async () => {
+      const said = prompt(
+        "Type exactly what is said in this reference clip.\n\n" +
+        "If the clip is English, Hindi will carry your timbre but an English accent. " +
+        "For native Hindi, re-record the clip in Hindi.",
+        v.reference_text || "");
+      if (said === null) return;
+      const fd = new FormData();
+      fd.append("reference_text", said);
+      await fetch("/api/voices/" + v.profile_id, { method: "PATCH", body: fd });
+      refreshVoices();
+    };
+    row.appendChild(fix);
+
+    const del = document.createElement("button");
+    del.className = "danger"; del.textContent = "Delete";
+    del.onclick = async () => { await fetch("/api/voices/" + v.profile_id, { method: "DELETE" }); refreshVoices(); };
+    row.appendChild(del);
+    list.appendChild(row);
+
+    const opt = document.createElement("option");
+    opt.value = v.profile_id; opt.textContent = v.speaker_name;
+    sel.appendChild(opt);
+
+    const dsOpt = document.createElement("option");
+    dsOpt.value = v.profile_id; dsOpt.textContent = v.speaker_name;
+    dsSel.appendChild(dsOpt);
+  });
+  $("speak").disabled = false;
+  $("speakHint").textContent = "";
+
+  // Keep whichever voice was being trained selected -- across a refresh of this
+  // list AND across a browser reload. Without the stored half, reloading reset the
+  // selector to the first voice, which showed an empty dataset for a speaker with
+  // no clips and read exactly like the recordings had been erased.
+  const want = dsPrev || localStorage.getItem("dsVoice");
+  if (want && [...dsSel.options].some(o => o.value === want)) dsSel.value = want;
+  localStorage.setItem("dsVoice", dsSel.value);
+  dsRefresh();
+}
+
+$("wipe").onclick = async () => {
+  const res = await fetch("/api/data", { method: "DELETE" });
+  const body = await res.json();
+  setStatus($("wipeStatus"), `Deleted ${body.deleted_profiles} profile(s) and destroyed the encryption key.`, "ok");
+  refreshVoices();
+};
+
+// --- download ------------------------------------------------------------
+let lastWav = null;   // the WAV we played, kept for re-encoding
+let lastText = "";
+
+// A real .webm needs a Matroska muxer, which libsndfile does not have, so the
+// server cannot produce one. The browser can: play the buffer into a
+// MediaStreamDestination and let MediaRecorder mux it. That runs in real time,
+// hence the progress note. Every other format is encoded server-side instantly.
+async function wavToWebm(wavBlob) {
+  const ctx = new AudioContext();
+  const buf = await ctx.decodeAudioData(await wavBlob.arrayBuffer());
+  const dest = ctx.createMediaStreamDestination();
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(dest);
+
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+  const rec = new MediaRecorder(dest.stream, { mimeType: mime });
+  const parts = [];
+  rec.ondataavailable = e => parts.push(e.data);
+
+  const done = new Promise(res => { rec.onstop = res; });
+  rec.start();
+  src.start();
+  await new Promise(res => { src.onended = res; });
+  rec.stop();
+  await done;
+  await ctx.close();
+  return new Blob(parts, { type: "audio/webm" });
+}
+
+function saveBlob(blob, ext) {
+  const name = (lastText.trim().slice(0, 40).replace(/[^\w\s-]/g, "").trim()
+    .replace(/\s+/g, "-").toLowerCase() || "speech") + "." + ext;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  return name;
+}
+
+$("download").onclick = async () => {
+  const fmt = $("fmt").value;
+  $("download").disabled = true;
+  try {
+    if (fmt === "webm") {
+      if (!lastWav) throw new Error("nothing synthesized yet");
+      setStatus($("speakStatus"), "Encoding WebM (runs in real time)…");
+      const blob = await wavToWebm(lastWav);
+      const name = saveBlob(blob, "webm");
+      setStatus($("speakStatus"), `Saved ${name} (${(blob.size / 1024).toFixed(0)} KB).`, "ok");
+    } else {
+      // Re-encode the audio we already have. This used to re-POST the text to
+      // /api/speak, which paid for a whole second synthesis just to change
+      // container -- and if Speak was still running, put two generations in
+      // flight and wedged the machine in swap.
+      if (!lastWav) throw new Error("nothing synthesized yet");
+      setStatus($("speakStatus"), `Encoding ${fmt.toUpperCase()}…`);
+      const fd = new FormData();
+      fd.append("audio", lastWav, "audio.wav");
+      fd.append("format", fmt);
+      const res = await fetch("/api/encode", { method: "POST", body: fd });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "failed");
+      const blob = await res.blob();
+      const name = saveBlob(blob, res.headers.get("X-Audio-Format") || fmt);
+      setStatus($("speakStatus"), `Saved ${name} (${(blob.size / 1024).toFixed(0)} KB).`, "ok");
+    }
+  } catch (e) {
+    setStatus($("speakStatus"), "Download failed: " + e.message, "err");
+  }
+  $("download").disabled = false;
+};
+
+// --- synthesis -----------------------------------------------------------
+$("speak").onclick = async () => {
+  const fd = new FormData();
+  fd.append("text", $("text").value);
+  fd.append("profile_id", $("voiceSel").value);
+
+  $("speak").disabled = true;
+  const hindi = /[\u0900-\u097F]/.test($("text").value);
+  setStatus($("speakStatus"), hindi
+    ? "Synthesizing Hindi… first run loads IndicF5 (~40s), then ~4s per second of speech."
+    : "Synthesizing… (first run loads the model, ~30s)");
+  const t0 = performance.now();
+  const res = await fetch("/api/speak", { method: "POST", body: fd });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setStatus($("speakStatus"), body.detail || "Synthesis failed.", "err");
+    $("speak").disabled = false; return;
+  }
+  const blob = await res.blob();
+  const wall = ((performance.now() - t0) / 1000).toFixed(1);
+  lastWav = blob;
+  lastText = $("text").value;
+  $("out").src = URL.createObjectURL(blob);
+  $("out").hidden = false;
+  $("out").play();
+  setStatus($("speakStatus"), "Done.", "ok");
+  $("metrics").textContent =
+    `${res.headers.get("X-Engine") || "?"} (${res.headers.get("X-Language") || "?"}) · ` +
+    `${res.headers.get("X-Audio-Seconds")}s of audio · synthesis ${res.headers.get("X-Synthesis-Ms")}ms · ` +
+    `realtime factor ${res.headers.get("X-Realtime-Factor")} · round trip ${wall}s · ` +
+    `${(blob.size / 1024).toFixed(0)} KB wav`;
+  $("speak").disabled = false;
+  $("download").disabled = false;
+};
+
+loadConfig().then(refreshVoices);
+// --- 4 · training dataset -------------------------------------------------
+// Reuses blobToWav() and the recorder pattern above rather than duplicating a
+// second encoder: the browser is the only thing that can decode its own webm.
+let dsBlob = null, dsSeconds = 0, dsRecorder = null, dsChunks = [], dsPrompts = [], dsPromptAt = 0;
+// Whether the clip being recorded is a reading of the displayed prompt. If it
+// is, the prompt text IS the transcript and Whisper must not be consulted:
+// asking it to guess text we already know can only introduce error, and it did
+// -- it heard कृपया as क्रिपय and स्पष्ट as इस पर्ष्ट, which would teach the model
+// that one word's sound belongs to another word's spelling.
+let dsReadingPrompt = true;
+
+const dsFmt = s => s >= 60 ? `${Math.floor(s/60)}m ${Math.round(s%60)}s` : `${s.toFixed(1)}s`;
+
+async function dsLoadPrompts() {
+  try { dsPrompts = await (await fetch("/api/prompts")).json(); } catch { dsPrompts = []; }
+  dsShowPrompt();
+}
+function dsShowPrompt() {
+  if (!dsPrompts.length) return;
+  const p = dsPrompts[dsPromptAt % dsPrompts.length];
+  $("dsPrompt").textContent = `${p.text}   —  ${p.register}`;
+}
+$("dsNextPrompt").onclick = () => { dsPromptAt++; dsShowPrompt(); };
+$("dsIsReading").onchange = e => { dsReadingPrompt = e.target.checked; };
+
+function dsVoiceId() { return $("dsVoice").value; }
+
+async function dsRefresh() {
+  const id = dsVoiceId();
+  if (!id) { $("dsProgress").textContent = "Enrol a voice first."; return; }
+  const d = await (await fetch(`/api/dataset/${id}`)).json();
+
+  $("dsBar").style.width = (d.fraction_of_target * 100).toFixed(1) + "%";
+  const need = Math.max(0, d.minimum_useful_seconds - d.total_seconds);
+  $("dsProgress").textContent =
+    `${d.clip_count} clips · ${dsFmt(d.total_seconds)} of ${dsFmt(d.target_seconds)} target` +
+    (d.usable ? " · enough to train on" : ` · ${dsFmt(need)} more before training is worth the compute`);
+
+  $("dsExport").disabled = d.clip_count === 0;
+  const box = $("dsClips");
+  if (!d.clips.length) { box.innerHTML = '<span class="muted">None yet.</span>'; return; }
+  box.innerHTML = "";
+  for (const c of d.clips.slice().reverse()) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const secs = document.createElement("span");
+    secs.className = "muted";
+    secs.style.minWidth = "52px";
+    secs.textContent = c.duration_seconds.toFixed(1) + "s";
+    const txt = document.createElement("input");
+    txt.value = c.text;
+    txt.style.flex = "1";
+    txt.onchange = async () => {
+      const body = new FormData(); body.append("text", txt.value);
+      const r = await fetch(`/api/dataset/${id}/clips/${c.clip_id}`, { method: "PATCH", body });
+      setStatus($("dsStatus"), r.ok ? "Transcript updated." : "Could not update transcript.", r.ok ? "ok" : "err");
+    };
+    const del = document.createElement("button");
+    del.className = "danger"; del.textContent = "Delete";
+    del.onclick = async () => {
+      await fetch(`/api/dataset/${id}/clips/${c.clip_id}`, { method: "DELETE" });
+      dsRefresh();
+    };
+    row.append(secs, txt, del);
+    box.append(row);
+  }
+}
+
+async function dsAccept(blob) {
+  const { blob: wav, seconds } = await blobToWav(blob);
+  dsBlob = wav; dsSeconds = seconds;
+  $("dsPreview").src = URL.createObjectURL(wav);
+  $("dsPreview").hidden = false;
+  $("dsClipInfo").textContent = seconds.toFixed(1) + "s";
+  $("dsSave").disabled = false;
+
+  const id = dsVoiceId();
+  if (!id) return;
+
+  // Exact text beats a good guess. Only fall back to Whisper for free speech.
+  if (dsReadingPrompt && dsPrompts.length) {
+    $("dsText").value = dsPrompts[dsPromptAt % dsPrompts.length].text;
+    setStatus($("dsStatus"), "Transcript taken from the prompt — exact, no transcription error. Save it.", "ok");
+    return;
+  }
+
+  setStatus($("dsStatus"), "Transcribing…");
+  const body = new FormData();
+  body.append("clip", wav, "clip.wav");
+  const r = await fetch(`/api/dataset/${id}/transcribe`, { method: "POST", body });
+  if (!r.ok) return setStatus($("dsStatus"), "Transcription failed — type the text by hand.", "err");
+  const d = await r.json();
+  $("dsText").value = d.text;
+  setStatus($("dsStatus"), `Heard ${d.language}. Check the text, then save.`, "ok");
+}
+
+$("dsRec").onclick = async () => {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { return setStatus($("dsStatus"), "Microphone permission denied.", "err"); }
+  dsChunks = [];
+  dsRecorder = new MediaRecorder(stream);
+  dsRecorder.ondataavailable = e => dsChunks.push(e.data);
+
+  const ctx = new AudioContext();
+  const analyser = ctx.createAnalyser();
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  const t0 = Date.now();
+  const tick = () => {
+    if (dsRecorder.state !== "recording") return;
+    analyser.getByteTimeDomainData(buf);
+    const peak = Math.max(...buf.map(v => Math.abs(v - 128))) / 128;
+    $("dsLevel").style.width = Math.min(100, peak * 180) + "%";
+    $("dsClipInfo").textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    requestAnimationFrame(tick);
+  };
+
+  dsRecorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    ctx.close();
+    $("dsLevel").style.width = "0%";
+    await dsAccept(new Blob(dsChunks, { type: "audio/webm" }));
+  };
+  dsRecorder.start();
+  requestAnimationFrame(tick);
+  $("dsRec").disabled = true; $("dsStop").disabled = false;
+  setStatus($("dsStatus"), "Recording — speak naturally, then stop.");
+};
+
+$("dsStop").onclick = () => {
+  if (dsRecorder && dsRecorder.state === "recording") dsRecorder.stop();
+  $("dsRec").disabled = false; $("dsStop").disabled = true;
+};
+
+$("dsFile").onchange = async e => {
+  if (e.target.files[0]) await dsAccept(e.target.files[0]);
+};
+
+$("dsSave").onclick = async () => {
+  const id = dsVoiceId();
+  if (!id || !dsBlob) return;
+  const text = $("dsText").value.trim();
+  if (!text) return setStatus($("dsStatus"), "A transcript is required — the model learns text to voice.", "err");
+
+  $("dsSave").disabled = true;
+  const body = new FormData();
+  body.append("clip", dsBlob, "clip.wav");
+  body.append("text", text);
+  body.append("language", /[ऀ-ॿ]/.test(text) ? "hi" : "en");
+  const r = await fetch(`/api/dataset/${id}/clips`, { method: "POST", body });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    setStatus($("dsStatus"), d.detail || "Could not save the clip.", "err");
+    $("dsSave").disabled = false;
+    return;
+  }
+  const d = await r.json();
+  setStatus($("dsStatus"), `Saved. ${d.clip_count} clips, ${dsFmt(d.total_seconds)} total.`, "ok");
+  dsBlob = null; $("dsText").value = ""; $("dsPreview").hidden = true; $("dsClipInfo").textContent = "";
+  dsPromptAt++; dsShowPrompt();
+  dsRefresh();
+};
+
+$("dsExport").onclick = async () => {
+  const id = dsVoiceId();
+  setStatus($("dsExportStatus"), "Exporting…");
+  const r = await fetch(`/api/dataset/${id}/export`, { method: "POST", body: new FormData() });
+  const d = await r.json();
+  if (!r.ok) return setStatus($("dsExportStatus"), d.detail || "Export failed.", "err");
+  $("dsExportStatus").className = "status ok";
+  $("dsExportStatus").textContent =
+    `${d.clip_count} clips (${dsFmt(d.total_seconds)}) written.\n\n` +
+    `${d.plaintext_warning}\n\n` + d.next_steps.join("\n\n");
+  $("dsExportStatus").style.whiteSpace = "pre-wrap";
+};
+
+$("dsWipe").onclick = async () => {
+  const id = dsVoiceId();
+  if (!id) return;
+  await fetch(`/api/dataset/${id}`, { method: "DELETE" });
+  setStatus($("dsStatus"), "All clips deleted. The enrolled voice is untouched.", "ok");
+  dsRefresh();
+};
+
+$("dsVoice").onchange = () => {
+  localStorage.setItem("dsVoice", dsVoiceId());
+  dsRefresh();
+};
+dsLoadPrompts();
+// --- long takes -----------------------------------------------------------
+// One Whisper pass over a whole take gives boundaries and aligned text together.
+// A VAD pass would find where speech stops but not what was said, so it would still
+// need a transcription call per segment.
+let dsTakeRecorder = null, dsTakeChunks = [];
+
+async function dsSplitTake(blob) {
+  const id = dsVoiceId();
+  if (!id) return setStatus($("dsTakeStatus"), "Pick a voice first.", "err");
+  setStatus($("dsTakeStatus"), "Converting…");
+  const { blob: wav, seconds } = await blobToWav(blob);
+  setStatus($("dsTakeStatus"), `Transcribing and splitting ${seconds.toFixed(0)}s — this takes a moment…`);
+
+  const body = new FormData();
+  body.append("clip", wav, "take.wav");
+  body.append("language", "hi");
+  const r = await fetch(`/api/dataset/${id}/segment`, { method: "POST", body });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return setStatus($("dsTakeStatus"), d.detail || "Splitting failed.", "err");
+
+  setStatus($("dsTakeStatus"),
+    `Saved ${d.saved} clips (${dsFmt(d.seconds_added)}) from ${dsFmt(d.take_seconds)}` +
+    (d.skipped ? `, skipped ${d.skipped} too-short fragment(s)` : "") +
+    `. ${d.review_note}`, "ok");
+  dsRefresh();
+}
+
+$("dsTakeRec").onclick = async () => {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { return setStatus($("dsTakeStatus"), "Microphone permission denied.", "err"); }
+  dsTakeChunks = [];
+  dsTakeRecorder = new MediaRecorder(stream);
+  dsTakeRecorder.ondataavailable = e => dsTakeChunks.push(e.data);
+
+  const ctx = new AudioContext();
+  const analyser = ctx.createAnalyser();
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  const t0 = Date.now();
+  const tick = () => {
+    if (dsTakeRecorder.state !== "recording") return;
+    analyser.getByteTimeDomainData(buf);
+    const peak = Math.max(...buf.map(v => Math.abs(v - 128))) / 128;
+    $("dsTakeLevel").style.width = Math.min(100, peak * 180) + "%";
+    setStatus($("dsTakeStatus"), `Recording ${((Date.now() - t0) / 1000).toFixed(0)}s — keep going.`);
+    requestAnimationFrame(tick);
+  };
+  dsTakeRecorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    ctx.close();
+    $("dsTakeLevel").style.width = "0%";
+    await dsSplitTake(new Blob(dsTakeChunks, { type: "audio/webm" }));
+  };
+  dsTakeRecorder.start();
+  requestAnimationFrame(tick);
+  $("dsTakeRec").disabled = true; $("dsTakeStop").disabled = false;
+};
+
+$("dsTakeStop").onclick = () => {
+  if (dsTakeRecorder && dsTakeRecorder.state === "recording") dsTakeRecorder.stop();
+  $("dsTakeRec").disabled = false; $("dsTakeStop").disabled = true;
+};
+
+$("dsTakeFile").onchange = async e => {
+  if (e.target.files[0]) await dsSplitTake(e.target.files[0]);
+};
+</script>
+</body>
+</html>

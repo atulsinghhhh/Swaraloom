@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+/* Swaraloom — editorial whiteboard under daylight.
+   Neutral canvas, one blue for action, one orange for decoration. */
+@theme {
+  --color-canvas: #ffffff;
+  --color-bone: #f5f5f4;
+  --color-mist: #edeeee;
+  --color-silk: #e5e5e5;
+  --color-quill: #d4d4d4;
+  --color-ash: #a1a1a1;
+  --color-pebble: #737373;
+  --color-slate: #525252;
+  --color-graphite: #404040;
+  --color-iron: #333333;
+  --color-charcoal: #262626;
+  --color-midnight: #171717;
+  --color-signal: #397dff;
+  --color-signal-deep: #2563eb;
+  --color-ember: #f55c15;
+  --color-ok: #16a34a;
+  --color-warn: #b45309;
+  --color-err: #dc2626;
+
+  --font-serif: var(--font-source-serif), Georgia, "Times New Roman", serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --radius-card: 20px;
+  --radius-small: 14px;
+  --radius-pill: 999px;
+
+  --shadow-float: 0 4px 12px rgba(23, 23, 23, 0.08), 0 24px 48px rgba(23, 23, 23, 0.06);
+  --shadow-stat: 0 1px 3px rgba(23, 23, 23, 0.04), 0 8px 24px rgba(23, 23, 23, 0.06);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-slate);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.55;
+  letter-spacing: 0.025em;
+  font-feature-settings: "tnum" 1, "ss01" 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Serif is a whisper: weight 300, tight tracking above 20px, never bold. */
+.font-display,
+.font-heading {
+  font-family: var(--font-serif);
+  font-weight: 300;
+  color: var(--color-midnight);
+  font-feature-settings: "liga" 1, "kern" 1;
+}
+.font-display {
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+.font-heading {
+  font-size: clamp(2rem, 4vw, 2.5rem);
+  line-height: 1.16;
+  letter-spacing: -0.02em;
+}
+.font-heading-lg {
+  font-family: var(--font-serif);
+  font-weight: 300;
+  color: var(--color-midnight);
+  font-size: clamp(2.25rem, 5vw, 3.5rem);
+  line-height: 1.13;
+  letter-spacing: -0.02em;
+}
+.font-heading-sm {
+  font-family: var(--font-serif);
+  font-weight: 300;
+  font-size: 1.25rem;
+  line-height: 1.3;
+  letter-spacing: -0.017em;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-signal) 22%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 2px;
+}
+
+audio {
+  width: 100%;
+  height: 40px;
+}
+
+/* Slow drift for the field texture behind the hero demo cards. */
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0) scale(1.04); }
+  to { transform: translate3d(-1.5%, -1%, 0) scale(1.08); }
+}
+@keyframes bar {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; }
+}

@@ -1,0 +1,128 @@
+[project]
+name = "voiceagent"
+version = "0.0.1"
+description = "Local-first, privacy-preserving voice AI agent for Apple Silicon"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+
+# Phase 0 dependencies ONLY.
+# Models (STT/LLM/TTS) are deliberately NOT installed yet -- each phase adds its own
+# extra so we can measure the incremental memory cost of every component.
+dependencies = [
+    "cryptography>=43",
+    "fastapi>=0.115",
+    "keyring>=25",
+    "mlx>=0.32",  # Phase 0 must prove Metal/MLX works before any model is chosen.
+    "numpy>=2.0",  # the audio type shared across the stt/tts module boundaries
+    "psutil>=6.0",
+    "python-multipart>=0.0.12",
+    "rich>=13.7",
+    "uvicorn>=0.32",
+]
+
+[project.optional-dependencies]
+# Phase 1 (STT) -- not installed yet, listed so the roadmap is legible.
+stt = [
+    "mlx>=0.32",
+    "mlx-whisper>=0.4.3",
+    # mlx-whisper pulls numba; without a floor uv backtracks to numba 0.53
+    # (Python <3.10 only) because modern numba caps numpy below our floor.
+    "numba>=0.61",
+    "moonshine-voice>=0.1.1",
+    "sounddevice>=0.5",  # live mic capture (PortAudio bindings, MIT)
+    "soundfile>=0.12",   # wav I/O for the benchmark fixtures (BSD-3-Clause)
+]
+# Phase 2 (LLM)
+llm = [
+    "mlx>=0.32",
+    "mlx-lm>=0.28",
+]
+# Phase 3 (TTS)
+tts = [
+    "mlx>=0.32",
+    "mlx-audio>=0.4.7",
+    "sounddevice>=0.5",  # playback
+    "soundfile>=0.12",   # writing wavs for inspection
+    # Kokoro's text frontend. Deliberately NOT `misaki[en]`: that extra pulls
+    # phonemizer-fork (GPLv3), which would make the packaged app GPL. We list
+    # the pieces of `en` we actually use and omit the espeak fallback --
+    # see voiceagent.tts.kokoro_engine._disable_gpl_espeak_fallback.
+    "misaki>=0.9.4",
+    "spacy>=3.8",
+]
+
+# Phase 7 (voice cloning) -- Chatterbox Turbo is MIT and runs through mlx-audio.
+clone = [
+    "mlx>=0.32",
+    "mlx-audio>=0.4.7",
+    "soundfile>=0.12",
+    "miniaudio>=1.6",  # decodes browser webm/ogg recordings without ffmpeg
+]
+loop = [
+    "onnxruntime>=1.20",
+    "silero-vad>=5.1",
+]
+tools = [
+    "httpx>=0.27",
+]
+# Phase 9 (Hindi TTS) -- Chatterbox Multilingual is MIT and arrives through
+# mlx-audio, which `tts` and `clone` already install. So this extra names only
+# what the Hindi *evaluation* path needs beyond that.
+#
+# It used to install `f5-tts` for IndicF5, and that single line is what made
+# `voice-doctor` exit non-zero: f5-tts drags in encodec (CC-BY-NC), Unidecode
+# (GPL), frozendict (LGPL-3) and soxr (LGPL-2.1). A non-commercial licence
+# restricts use, not only redistribution, so no amount of "we never ship the
+# weights" cleared it. There was also a `remote` extra whose entire purpose was
+# to let a second machine talk to an f5-tts service without installing f5-tts
+# itself; with the dependency gone there is nothing left to quarantine, so the
+# extra, `tts/remote_engine.py` and `web/tts_service.py` all went with it.
+indic = [
+    "mlx>=0.32",
+    "mlx-audio>=0.4.7",
+    "soundfile>=0.12",
+    "scipy>=1.11",      # build_benchmark.py resamples the benchmark conditions to
+                        # one rate (BSD-3-Clause, and chosen over soxr, which is LGPL)
+]
+# Phase 2 evidence -- scoring against AI4Bharat's SpeechArenaBench.
+#
+# The Hindi config is 32.5 GiB because every pairwise row embeds both clips, and
+# the whole dataset is 241 GiB. We want the text and the votes, which are a few
+# MiB of that. pyarrow reads Parquet column-wise over HTTP range requests, so
+# projecting to the text columns downloads the column chunks and nothing else --
+# that is the entire reason this dependency is here, and it is Apache-2.0.
+#
+# `datasets` would have been the obvious library and was rejected: it materializes
+# whole splits before you can filter, which is the 32.5 GiB we are avoiding.
+arena = [
+    "pyarrow>=18",
+    "huggingface-hub>=0.26",
+]
+
+[project.scripts]
+voice-doctor = "voiceagent.diagnostics.doctor:main"
+voice-web = "voiceagent.web.server:main"
+voice-chat = "voiceagent.orchestration.loop:main"
+voice-keys = "voiceagent.web.keys:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voiceagent"]
+artifacts = ["src/voiceagent/web/static/*"]
+
+[tool.uv]
+# Keep the venv reproducible and local to the project.
+managed = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

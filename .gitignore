@@ -1,0 +1,40 @@
+.venv/
+__pycache__/
+*.py[cod]
+.uv/
+uv.lock.bak
+
+# Model weights are large and re-downloadable; never commit them.
+models/
+*.safetensors
+*.gguf
+*.onnx
+
+# Privacy: local user data must never leave this machine.
+data/
+*.db
+*.sqlite
+*.sqlite3
+recordings/
+voice_profiles/
+
+# Real recorded speech and anything cloned from it. The English fixtures are
+# synthetic (macOS `say`, see stt/fixtures.py) and stay tracked; these do not.
+fixtures/hi/
+eval_out/
+
+.DS_Store
+.env
+
+# Rust build artifacts (the Tauri target dir is ~1.5 GB)
+desktop/src-tauri/target/
+
+# Scratch: list of containers that were running, written during a benchmark run.
+.docker-was-running.txt
+
+# Built by desktop/build_runtime.sh -- 1.3 GB, reproducible in a few minutes.
+desktop/src-tauri/runtime/
+
+# Vercel CLI link + OIDC token (site/)
+.vercel/
+.env.local

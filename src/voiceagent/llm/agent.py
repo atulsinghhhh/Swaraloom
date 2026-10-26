@@ -1,0 +1,287 @@
+"""The tool-calling loop.
+
+Drives an LLMEngine: stream a response, run any tools it calls, feed the results
+back, and repeat until the model answers without calling a tool.
+
+Run the Phase 2 console demo with::
+
+    uv run python -m voiceagent.llm.agent
+    uv run python -m voiceagent.llm.agent --prompt "what's the weather in Paris?"
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from rich.console import Console
+
+from voiceagent.llm.base import LLMEngine, Message, ToolCall
+from voiceagent.tools.base import Tool, ToolResult
+
+console = Console()
+
+SYSTEM_PROMPT = (
+    "You are a local voice assistant. Your replies are spoken aloud by a "
+    "speech synthesizer, so: keep them to one or two short sentences, write "
+    "plain prose only, and never use emoji, markdown, bullet points, or "
+    "special characters -- they get read out literally or mangled. Spell out "
+    "symbols as words. Use the supplied tools when they are relevant instead "
+    "of guessing. "
+    # The language rule is not politeness, it is a routing requirement: the TTS
+    # engine is chosen by the script of this reply, and neither engine degrades
+    # gracefully into the other's language. Qwen3 already mirrors the user's
+    # language without being told (measured 100% Devanagari on Hindi turns at
+    # baseline), but that was emergent rather than guaranteed. Saying it also
+    # shortened replies, which matters when they are spoken:
+    # 10.2 -> 7.3 words per sentence. See voiceagent.eval.hindi_llm.
+    "Reply in the same language the user wrote in; when they write Hindi, reply "
+    "in Devanagari script, never romanized Hindi and never English."
+)
+
+#: Cap on tool round-trips per turn, so a confused model cannot loop forever.
+MAX_ITERATIONS = 5
+
+
+@dataclass
+class AgentEvent:
+    kind: Literal["text", "tool_call", "tool_result", "done"]
+    text: str = ""
+    tool_call: ToolCall | None = None
+    tool_result: ToolResult | None = None
+    time_to_first_token_ms: float | None = None
+
+
+#: Called with (tool, arguments); returns True to allow the call. Tools that
+#: declare requires_confirmation are never run without one of these returning
+#: True -- the default refuses, so forgetting to wire it up fails closed.
+ConfirmHook = "Callable[[Tool, dict[str, Any]], Awaitable[bool]]"
+
+
+async def _deny_by_default(tool: Tool, arguments: dict[str, Any]) -> bool:
+    return False
+
+
+class Agent:
+    def __init__(
+        self,
+        engine: LLMEngine,
+        tools: list[Tool] | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
+        registry: "ToolRegistry | None" = None,
+        confirm=None,
+        store=None,
+    ) -> None:
+        from voiceagent.tools.registry import ToolRegistry
+
+        self.engine = engine
+        self.registry = registry or ToolRegistry(tools or [])
+        self.confirm = confirm or _deny_by_default
+        self.history: list[Message] = [Message(role="system", content=system_prompt)]
+
+        #: Optional EncryptedStore. When set, turns are persisted and relevant
+        #: past facts are retrieved into the prompt.
+        self.store = store
+        self.conversation_id: int | None = None
+        if self.store is not None:
+            self.conversation_id = self.store.start_conversation()
+
+    def _retrieve(self, user_text: str) -> str | None:
+        """Fetch memories relevant to this turn, as a prompt fragment.
+
+        Injected as a system message rather than appended to the user's words,
+        so the model cannot mistake recalled context for something the user just
+        said -- and so it stays out of the cached prefix, which must not change
+        between turns.
+        """
+        if self.store is None:
+            return None
+        hits = self.store.recall(user_text, limit=3)
+        if not hits:
+            return None
+        facts = "\n".join(f"- {m.content}" for m in hits)
+        return f"Relevant things you know about this user:\n{facts}"
+
+    @property
+    def tools(self) -> dict[str, Tool]:
+        return {tool.name: tool for tool in self.registry}
+
+    @property
+    def tool_specs(self) -> list[dict[str, Any]] | None:
+        return self.registry.specs()
+
+    async def _invoke(self, call: ToolCall) -> ToolResult:
+        tool = self.registry.get(call.name)
+        if tool is not None and tool.requires_confirmation:
+            approved = await self.confirm(tool, call.arguments)
+            if not approved:
+                # Reported as a tool result, not an exception, so the model can
+                # tell the user it was declined instead of the turn dying.
+                return ToolResult(
+                    content="", ok=False, error="the user declined this action"
+                )
+        return await self.registry.invoke(call.name, call.arguments)
+
+    async def prime(self) -> None:
+        """Pre-compute the KV cache for the system prompt and tool schemas.
+
+        Those tokens are identical on every turn, but an empty cache means turn
+        one pays for all of them -- measured at 1457 ms to first token in the
+        full loop versus ~150 ms once warm. Priming at load moves that cost off
+        the user's first question.
+        """
+        async for _ in self.engine.stream(self.history, tools=self.tool_specs, max_tokens=1):
+            pass
+
+    async def turn(self, user_text: str, max_tokens: int = 512) -> AsyncIterator[AgentEvent]:
+        """Run one user turn to completion, yielding events as they happen."""
+        recalled = self._retrieve(user_text)
+        if recalled:
+            self.history.append(Message(role="system", content=recalled))
+
+        self.history.append(Message(role="user", content=user_text))
+        if self.store is not None:
+            self.store.add_message(self.conversation_id, "user", user_text)
+
+        for _ in range(MAX_ITERATIONS):
+            spoken = ""
+            calls: list[ToolCall] = []
+
+            async for chunk in self.engine.stream(
+                self.history, tools=self.tool_specs, max_tokens=max_tokens
+            ):
+                if chunk.text:
+                    spoken += chunk.text
+                    yield AgentEvent(
+                        kind="text",
+                        text=chunk.text,
+                        time_to_first_token_ms=chunk.time_to_first_token_ms,
+                    )
+                elif chunk.time_to_first_token_ms is not None:
+                    # First token was withheld by the tool-call parser; still
+                    # report when it arrived so TTFT stays honest.
+                    yield AgentEvent(
+                        kind="text",
+                        time_to_first_token_ms=chunk.time_to_first_token_ms,
+                    )
+                if chunk.tool_call:
+                    calls.append(chunk.tool_call)
+
+            self.history.append(
+                Message(role="assistant", content=spoken, tool_calls=calls)
+            )
+
+            if not calls:
+                if self.store is not None and spoken.strip():
+                    self.store.add_message(self.conversation_id, "assistant", spoken.strip())
+                yield AgentEvent(kind="done")
+                return
+
+            for call in calls:
+                yield AgentEvent(kind="tool_call", tool_call=call)
+                result = await self._invoke(call)
+                yield AgentEvent(kind="tool_result", tool_call=call, tool_result=result)
+                self.history.append(
+                    Message(
+                        role="tool",
+                        content=result.content if result.ok else f"ERROR: {result.error}",
+                        tool_call_id=call.name,
+                    )
+                )
+
+        yield AgentEvent(kind="done")
+
+
+# --- console demo ---------------------------------------------------------
+
+
+async def _run_turn(agent: Agent, prompt: str) -> None:
+    console.print(f"\n[bold cyan]you[/] {prompt}")
+    console.print("[bold green]agent[/] ", end="")
+
+    ttft: float | None = None
+    started = time.perf_counter()
+    printed_any = False
+
+    async for event in agent.turn(prompt):
+        if event.time_to_first_token_ms is not None and ttft is None:
+            ttft = event.time_to_first_token_ms
+        if event.kind == "text" and event.text:
+            console.print(event.text, end="")
+            printed_any = True
+        elif event.kind == "tool_call":
+            prefix = "\n" if printed_any else ""
+            console.print(
+                f"{prefix}[yellow]-> calling {event.tool_call.name}"
+                f"({event.tool_call.arguments})[/]"
+            )
+        elif event.kind == "tool_result":
+            result = event.tool_result
+            body = result.content if result.ok else f"ERROR: {result.error}"
+            console.print(f"[yellow]<- {body}[/]")
+            console.print("[bold green]agent[/] ", end="")
+
+    total_ms = (time.perf_counter() - started) * 1000
+    console.print(
+        f"\n[dim]time to first token: {ttft:.0f} ms | turn total: {total_ms:.0f} ms[/]"
+        if ttft
+        else f"\n[dim]turn total: {total_ms:.0f} ms[/]"
+    )
+
+
+async def main_async(prompts: list[str], interactive: bool) -> None:
+    from voiceagent.llm.mlx_engine import MLXLLMEngine
+    from voiceagent.tools.dummy import DummyWeatherTool
+
+    engine = MLXLLMEngine()
+    console.print(f"[dim]loading {engine.repo}...[/]")
+    started = time.perf_counter()
+    engine.load()
+    console.print(
+        f"[dim]loaded in {time.perf_counter() - started:.1f}s "
+        f"({engine.resident_bytes / 1024**3:.2f} GiB peak)[/]"
+    )
+
+    weather = DummyWeatherTool()
+    agent = Agent(engine, tools=[weather])
+
+    for prompt in prompts:
+        await _run_turn(agent, prompt)
+
+    if interactive:
+        console.print("\n[dim]Type a message, or Ctrl-C to quit.[/]")
+        while True:
+            try:
+                prompt = await asyncio.to_thread(input, "\nyou> ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if prompt.strip():
+                await _run_turn(agent, prompt)
+
+    console.print(f"\n[dim]dummy tool was invoked {len(weather.calls)} time(s): {weather.calls}[/]")
+    engine.unload()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Phase 2 tool-calling demo.")
+    parser.add_argument("--prompt", action="append", help="run this prompt (repeatable)")
+    parser.add_argument("--chat", action="store_true", help="drop into an interactive loop")
+    args = parser.parse_args()
+
+    prompts = args.prompt or [
+        "Hello! Say hi back in one short sentence.",
+        "What's the weather in Paris right now?",
+    ]
+    try:
+        asyncio.run(main_async(prompts, interactive=args.chat))
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
